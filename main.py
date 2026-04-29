@@ -1,5 +1,6 @@
 import re
 import io
+import logging
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,6 +10,9 @@ from telegram.ext import (
     filters
 )
 
+# Enable logging for debugging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
 # ---------------- CONFIG ----------------
 
 BOT_TOKEN = "8792417044:AAFhz54pXi1TViE-xRaeRVAqE041OUL5o-M"
@@ -17,35 +21,38 @@ MAX_Q_LEN = 300
 MAX_OPT_LEN = 100
 MAX_EXPL_LEN = 200
 
-# Stores blocks for each user until /done is called
 USER_SESSIONS = {}
 
-# Detect real options only: a) (a) a.
-OPTION_START_RE = re.compile(r"^\(?[a-e]\)|^[a-e]\.")
-# Detect Answer: a/b/c/d/e
-ANSWER_RE = re.compile(r"^answer:\s*([a-e])", re.IGNORECASE)
+# Robust Regex Patterns
+OPTION_START_RE = re.compile(r"^\(?[a-e]\)|^[a-e][\.\)]", re.IGNORECASE)
+ANSWER_FLAG_RE = re.compile(r"^answer:\s*([a-e])", re.IGNORECASE)
+EXPLANATION_RE = re.compile(r"^ex:", re.IGNORECASE)
+BLOCK_SPLIT_RE = re.compile(r"\n\s*\n\s*\n") # Handles triple newlines with varying spaces
 
 # ---------------- COMMANDS ----------------
 
 async def annon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_SESSIONS[update.effective_user.id] = []
     await update.message.reply_text(
-        "📩 Send questions via message or .txt file.\n\n"
-        "Rules:\n"
-        "• Mark correct option with ✅ OR 'Answer: a'\n"
-        "• Explanation starts with ex:\n"
-        "• Once finished, send /done to generate polls."
+        "🚀 **Advanced Poll Bot Active**\n\n"
+        "1. Send questions (Text or .txt file)\n"
+        "2. Use ✅ or `Answer: a` for the correct choice\n"
+        "3. Use `ex:` for explanations\n"
+        "4. Separate questions with **3 blank lines**\n"
+        "5. Send /done when finished."
     )
 
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in USER_SESSIONS or not USER_SESSIONS[uid]:
-        await update.message.reply_text("❌ No questions found. Send some first!")
+        await update.message.reply_text("❌ No questions in queue!")
         return
 
     blocks = USER_SESSIONS[uid]
-    success = 0
-    errors = []
+    success, fail = 0, 0
+    error_log = []
+
+    await update.message.reply_text(f"⏳ Processing {len(blocks)} questions...")
 
     for i, block in enumerate(blocks, start=1):
         try:
@@ -53,142 +60,126 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_quiz(update, qdata)
             success += 1
         except Exception as e:
-            errors.append(f"Q{i}: {e}")
+            fail += 1
+            error_log.append(f"Block {i}: {str(e)}")
 
-    msg = f"✅ {success} quiz poll(s) created."
-    if errors:
-        msg += "\n\n❌ Errors:\n" + "\n".join(errors)
-
-    await update.message.reply_text(msg)
-    del USER_SESSIONS[uid]
+    summary = f"✅ Created: {success}\n❌ Failed: {fail}"
+    if error_log:
+        summary += "\n\n**Error Details:**\n" + "\n".join(error_log)
+    
+    await update.message.reply_text(summary)
+    USER_SESSIONS[uid] = [] # Clear session after processing
 
 # ---------------- PARSER ----------------
 
 def parse_question_block(block: str):
-    original_text = block.strip()
-    lines = block.split("\n")
+    lines = [l.strip() for l in block.split("\n") if l.strip()]
+    if not lines:
+        raise ValueError("Empty block")
 
-    question_lines = []
+    q_text_parts = []
     options = []
-    explanation_lines = []
+    explanation = ""
+    correct_idx = None
+    
+    mode = "question" # modes: question, options, explanation
 
-    correct_index = None
-    mode = "question"
-    has_multiline_option = False
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        low = line.lower()
-
-        # Check for Answer: a/b/c format
-        ans_match = ANSWER_RE.match(low)
-        if ans_match:
-            letter = ans_match.group(1)
-            correct_index = ord(letter) - ord('a')
-            continue
-
-        # Explanation
-        if low.startswith("ex:"):
+    for line in lines:
+        # 1. Check for Explanation Flag
+        if EXPLANATION_RE.match(line):
             mode = "explanation"
-            explanation_lines.append(line[3:].strip())
+            explanation = line[3:].strip()
+            continue
+        
+        # 2. Check for Answer Flag
+        ans_match = ANSWER_FLAG_RE.match(line)
+        if ans_match:
+            correct_idx = ord(ans_match.group(1).lower()) - ord('a')
             continue
 
-        # Option start
+        # 3. Check for Option Start
         if OPTION_START_RE.match(line):
             mode = "options"
-            is_correct = "✅" in line
-            
-            clean = re.sub(r"^\(?[a-e]\)|^[a-e]\.\s*", "", line.replace("✅", "")).strip()
-            options.append(clean)
-            
-            if is_correct:
-                correct_index = len(options) - 1
-            continue
-
-        # Multiline option continuation
-        if mode == "options" and options:
             if "✅" in line:
-                correct_index = len(options) - 1
+                correct_idx = len(options)
             
-            if not ANSWER_RE.match(low): # Ensure Answer: a isn't appended to options
-                has_multiline_option = True
-                options[-1] += " " + line.replace("✅", "").strip()
+            clean_opt = re.sub(r"^\(?[a-e]\)|^[a-e][\.\)]\s*", "", line.replace("✅", "")).strip()
+            options.append(clean_opt)
             continue
 
-        # Explanation continuation
-        if mode == "explanation":
-            explanation_lines.append(line)
-            continue
-
-        # Question text
+        # 4. Handle Content based on current mode
         if mode == "question":
-            question_lines.append(line)
+            q_text_parts.append(line)
+        elif mode == "options" and options:
+            # Multiline option continuation (Only if not a new flag)
+            if "✅" in line:
+                correct_idx = len(options) - 1
+            options[-1] += " " + line.replace("✅", "").strip()
+        elif mode == "explanation":
+            explanation += " " + line
 
-    if not question_lines:
-        raise ValueError("Question text missing")
-    if len(options) < 2:
-        raise ValueError("Minimum 2 options required")
-    if correct_index is None or correct_index >= len(options):
-        raise ValueError("No valid correct option marked (use ✅ or Answer: a)")
+    # Validations
+    q_final = "\n".join(q_text_parts)
+    if not q_final: raise ValueError("Missing question text")
+    if len(options) < 2: raise ValueError(f"Need 2+ options (Found {len(options)})")
+    if correct_idx is None: raise ValueError("No correct answer marked (✅ or Answer: x)")
+    if correct_idx >= len(options): raise ValueError(f"Answer key '{chr(97+correct_idx)}' out of range")
 
     return {
-        "question": "\n".join(question_lines),
+        "question": q_final,
         "options": options,
-        "correct": correct_index,
-        "explanation": "\n".join(explanation_lines).strip(),
-        "has_multiline_option": has_multiline_option,
-        "original_text": original_text
+        "correct": correct_idx,
+        "explanation": explanation.strip(),
+        "original_text": block
     }
 
 # ---------------- SENDER ----------------
 
-async def send_quiz(update, qdata):
-    question = qdata["question"]
-    options = qdata["options"]
-    correct = qdata["correct"]
-    explanation = qdata["explanation"]
+async def send_quiz(update: Update, qdata: dict):
+    q = qdata["question"]
+    opts = qdata["options"]
+    idx = qdata["correct"]
+    ex = qdata["explanation"]
 
-    question_over = len(question) > MAX_Q_LEN
-    option_over = any(len(o) > MAX_OPT_LEN for o in options) or qdata["has_multiline_option"]
-    explanation_ok = explanation and len(explanation) <= MAX_EXPL_LEN
+    # Logic to check if Native Poll is possible
+    is_multiline = "\n" in qdata["original_text"] # Basic check
+    too_long = len(q) > MAX_Q_LEN or any(len(o) > MAX_OPT_LEN for o in opts)
+    ex_valid = ex if (ex and len(ex) <= MAX_EXPL_LEN) else None
 
-    if not question_over and not option_over:
-        await update.message.reply_poll(
-            question=question,
-            options=options,
-            type="quiz",
-            correct_option_id=correct,
-            explanation=explanation if explanation_ok else None,
-            is_anonymous=True
-        )
-        return
+    if not too_long:
+        try:
+            await update.message.reply_poll(
+                question=q[:MAX_Q_LEN],
+                options=opts,
+                type="quiz",
+                correct_option_id=idx,
+                explanation=ex_valid,
+                is_anonymous=True
+            )
+            return
+        except Exception:
+            pass # Fallback if poll fails for any other reason
 
-    # Fallback logic preserved
-    if qdata["has_multiline_option"]:
-        # Clean text for display by removing the "Answer: x" or ticks
-        display_text = re.sub(ANSWER_RE, "", qdata["original_text"], flags=re.I).replace("✅", "").strip()
-        sent_msg = await update.message.reply_text(display_text)
-    else:
-        msg_parts = [question]
-        for idx, opt in enumerate(options):
-            msg_parts.append(f"{chr(97+idx)}) {opt}")
-        sent_msg = await update.message.reply_text("\n\n".join(msg_parts))
+    # FALLBACK SYSTEM
+    # Clean text: Remove ticks and Answer flags for the message
+    clean_text = re.sub(ANSWER_FLAG_RE, "", qdata["original_text"], flags=re.I)
+    clean_text = clean_text.replace("✅", "").strip()
 
-    poll_options = [chr(65+i) for i in range(len(options))]
+    sent_msg = await update.message.reply_text(clean_text)
+    
+    # Send simplified poll linked to message
+    alpha_opts = [f"Option {chr(65+i)}" for i in range(len(opts))]
     await update.message.reply_poll(
-        question="Choose the correct option",
-        options=poll_options,
+        question="Select the correct answer below:",
+        options=alpha_opts,
         type="quiz",
-        correct_option_id=correct,
-        explanation=explanation if explanation_ok else None,
+        correct_option_id=idx,
+        explanation=ex_valid,
         is_anonymous=True,
         reply_to_message_id=sent_msg.message_id
     )
 
-# ---------------- HANDLERS ----------------
+# ---------------- INPUT HANDLER ----------------
 
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -197,33 +188,35 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     content = ""
     if update.message.document:
-        if update.message.document.file_name.endswith('.txt'):
+        if update.message.document.file_name.lower().endswith('.txt'):
             file = await context.bot.get_file(update.message.document.file_id)
-            out = io.BytesIO()
-            await file.download_to_memory(out)
-            content = out.getvalue().decode('utf-8')
+            buf = io.BytesIO()
+            await file.download_to_memory(buf)
+            content = buf.getvalue().decode('utf-8')
         else:
-            await update.message.reply_text("❌ Only .txt files are supported.")
+            await update.message.reply_text("❌ Please send a .txt file.")
             return
     else:
         content = update.message.text
 
-    blocks = [b.strip() for b in content.split("\n\n\n") if b.strip()]
-    USER_SESSIONS[uid].extend(blocks)
-    await update.message.reply_text(f"📥 Added {len(blocks)} blocks. Send more or use /done.")
+    # Split into blocks using the advanced regex
+    new_blocks = [b.strip() for b in BLOCK_SPLIT_RE.split(content) if b.strip()]
+    USER_SESSIONS[uid].extend(new_blocks)
+    
+    await update.message.reply_text(f"📥 Added {len(new_blocks)} questions to queue. (Total: {len(USER_SESSIONS[uid])})\nSend /done to finish.")
 
 # ---------------- MAIN ----------------
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("annon", annon))
     app.add_handler(CommandHandler("done", done))
-    # Handle both text and txt files
     app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, handle_input))
     
-    print("🤖 Bot running with Answer: x support and /done command...")
+    print("🤖 Advanced Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-      
+    
