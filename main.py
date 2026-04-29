@@ -26,12 +26,12 @@ OPTION_START_RE = re.compile(r"^\(?[a-e]\)|^[a-e]\.")
 async def annon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAITING_USERS.add(update.effective_user.id)
     await update.message.reply_text(
-        "ðŸ“© Send all questions in ONE message.\n\n"
+        "📩 Send all questions in ONE message.\n\n"
         "Rules:\n"
-        "â€¢ Options: a) / (a) / a.\n"
-        "â€¢ Mark correct option with âœ…\n"
-        "â€¢ Explanation must start with ex:\n"
-        "â€¢ One blank line between questions"
+        "• Options: a) / (a) / a.\n"
+        "• Mark correct option with ✅\n"
+        "• Explanation must start with ex:\n"
+        "• One blank line between questions"
     )
 
 # ---------------- PARSER ----------------
@@ -65,11 +65,11 @@ def parse_question_block(block: str):
         if OPTION_START_RE.match(line.strip()):
             mode = "options"
 
-            is_correct = "âœ…" in line
+            is_correct = "✅" in line
             clean = re.sub(
                 r"^\(?[a-e]\)|^[a-e]\.\s*",
                 "",
-                line.replace("âœ…", "")
+                line.replace("✅", "")
             ).strip()
 
             options.append(clean)
@@ -81,9 +81,9 @@ def parse_question_block(block: str):
         # Multiline option continuation
         if mode == "options" and options:
             has_multiline_option = True
-            if "âœ…" in line:
+            if "✅" in line:
                 correct_index = len(options) - 1
-            options[-1] += " " + line.replace("âœ…", "").strip()
+            options[-1] += " " + line.replace("✅", "").strip()
             continue
 
         # Explanation continuation
@@ -99,7 +99,7 @@ def parse_question_block(block: str):
     if len(options) < 2:
         raise ValueError("Minimum 2 options required")
     if correct_index is None:
-        raise ValueError("No correct option marked with âœ…")
+        raise ValueError("No correct option marked with ✅")
 
     return {
         "question": "\n".join(question_lines),
@@ -140,7 +140,7 @@ async def send_quiz(update, qdata):
 
     # Fallback MESSAGE (CRITICAL FIX)
     if qdata["has_multiline_option"]:
-        clean_text = qdata["original_text"].replace("âœ…", "")
+        clean_text = qdata["original_text"].replace("✅", "")
         sent_msg = await update.message.reply_text(
             clean_text
         )
@@ -187,9 +187,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             errors.append(f"Q{i}: {e}")
 
-    msg = f"âœ… {success} quiz poll(s) created."
+    msg = f"✅ {success} quiz poll(s) created."
     if errors:
-        msg += "\n\nâŒ Errors:\n" + "\n".join(errors)
+        msg += "\n\n❌ Errors:\n" + "\n".join(errors)
 
     await update.message.reply_text(msg)
 
@@ -199,7 +199,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("annon", annon))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    print("ðŸ¤– Bot running...")
+    print("🤖 Bot running...")
     app.run_polling()
 
 if __name__ == "__main__":
